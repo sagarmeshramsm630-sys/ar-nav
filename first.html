@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#000000" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>AR Navigation – Demo</title>
+  <style>
+    :root{
+      --ui: 14px;
+      --brand:#2aa8ff;
+      --brand-strong:#20a0ff;
+      --brand-soft:#9fd9ff;
+      --bg:#000;
+    }
+    *{box-sizing:border-box;}
+    html,body{height:100%;margin:0;background:#000;color:#111;font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;}
+    .app{position:fixed;inset:0;overflow:hidden;}
+
+    /* Camera */
+    #camera{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);} /* mirror for selfie-like experience */
+    .fallback{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;background:linear-gradient(180deg,#111,#222);}    
+
+    /* Overlay canvas */
+    #overlay{position:absolute;inset:0;pointer-events:none;}
+
+    /* Top HUD */
+    .hud{position:absolute;left:12px;right:12px;top:calc(env(safe-area-inset-top,0) + 8px);display:flex;align-items:center;justify-content:space-between;gap:8px;z-index:10;}
+    .hud .panel{flex:1;display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:16px;background:linear-gradient(180deg,#ff9a6b,#ff6d6d);color:#fff;box-shadow:0 10px 30px rgba(0,0,0,.25);}    
+    .hud .title{position:absolute;left:0;right:0;text-align:center;font-weight:600;pointer-events:none;color:#fff;}
+    .hud .exit{position:absolute;right:20px;top:10px;color:#fff;background:transparent;border:none;font-weight:600;font-size:var(--ui);text-decoration:underline;}
+    .metrics{display:flex;gap:18px;font-size:var(--ui);}
+    .metric .v{display:block;font-size:22px;font-weight:700;line-height:1;}
+
+    /* Bottom controls */
+    .bottom{position:absolute;left:0;right:0;bottom:calc(env(safe-area-inset-bottom,0) + 18px);display:flex;align-items:center;justify-content:center;gap:10px;z-index:10;}
+    .chip{font-size:12px;padding:7px 10px;border-radius:999px;background:#fff;box-shadow:0 8px 20px rgba(0,0,0,.25);}
+    .main-btn{padding:11px 16px;border-radius:999px;background:#ffb44d;color:#212121;border:none;font-weight:700;box-shadow:0 10px 25px rgba(0,0,0,.3);}
+
+    /* Motion permission banner */
+    .motion-banner{position:absolute;left:12px;right:12px;bottom:calc(env(safe-area-inset-bottom,0) + 86px);background:rgba(0,0,0,.55);border:1px solid rgba(255,255,255,.2);color:#fff;border-radius:12px;padding:12px;backdrop-filter:blur(8px);display:none;z-index:20;}
+    .motion-banner.show{display:block;}
+    .motion-banner button{margin-top:8px;border-radius:10px;border:none;padding:10px 12px;font-weight:600;}
+
+    /* Pin */
+    .pin{position:absolute;width:30px;height:30px;border-radius:50%;background:#ff6b6b;display:flex;align-items:center;justify-content:center;color:#fff;left:50%;transform:translateX(-50%);top:40%;box-shadow:0 8px 20px rgba(0,0,0,.35);} 
+
+    /* Map mode */
+    .map{position:absolute;inset:0;background:#f7f7f7;display:none;}
+    .map.show{display:block;}
+    .map canvas{position:absolute;inset:0;}
+  </style>
+</head>
+<body>
+  <div class="app" id="app">
+    <video id="camera" playsinline webkit-playsinline muted autoplay></video></video>
+    <canvas id="overlay"></canvas>
+
+    <div class="hud">
+      <div class="panel">
+        <div class="title">Check-in counter P</div>
+        <button class="exit" id="exitBtn" aria-label="Exit">Exit</button>
+        <div class="metrics">
+          <div class="metric">Distance <span class="v" id="distanceV">30</span>m</div>
+          <div class="metric">Walk (estimate) <span class="v" id="etaV">0.5</span>min</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pin">😊</div>
+
+    <div class="bottom">
+      <div class="chip">3F</div>
+      <button class="main-btn" id="mapToggle">MAP Mode</button>
+    </div>
+
+    <div class="motion-banner" id="motionBanner">
+      <div><strong>Enable Motion & Compass</strong><br/> To align arrows with your heading on iOS, please allow motion access.</div>
+      <button id="enableMotion">Allow</button>
+    </div>
+
+    <div class="fallback" id="fallback" hidden>
+      <div>
+        <p>Camera unavailable. Grant permissions and reload.</p>
+      </div>
+    </div>
+
+    <div class="map" id="mapPanel" role="dialog" aria-modal="true" aria-label="Map">
+      <canvas id="mapCanvas"></canvas>
+    </div>
+  </div>
+
+  <script>
+  // ====== Camera ======
+  const video = document.getElementById('camera');
+  const overlay = document.getElementById('overlay');
+  const fallback = document.getElementById('fallback');
+  const app = document.getElementById('app');
+
+  async function initCamera(){
+    try{
+      const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+      video.srcObject = stream;
+      await video.play();
+    }catch(err){
+      console.warn(err);
+      fallback.hidden = false;
+    }
+    resize();
+    requestAnimationFrame(draw);
+  }
+
+  // ====== HUD Numbers ======
+  const distanceEl = document.getElementById('distanceV');
+  const etaEl = document.getElementById('etaV');
+  let distanceM = 30; // start at 30m
+  const speedMps = 1.0; // assumed walking speed
+  function tickDistance(delta){
+    if(!navActive) return;
+    distanceM = Math.max(0, distanceM - speedMps * delta);
+    distanceEl.textContent = distanceM.toFixed(0);
+    const etaMin = distanceM / speedMps / 60;
+    etaEl.textContent = (etaMin < 0.1 ? 0 : etaMin).toFixed(1);
+  }
+  let lastT = performance.now();
+
+  // ====== Orientation (for heading) ======
+  let heading = 0; // degrees
+  function handleOrientation(e){
+    const a = e.webkitCompassHeading != null ? e.webkitCompassHeading : (360 - (e.alpha || 0));
+    if(Number.isFinite(a)) heading = a; // 0..360 (0 = North)
+  }
+  window.addEventListener('deviceorientation', handleOrientation);
+
+  // iOS permission flow
+  const motionBanner = document.getElementById('motionBanner');
+  const enableMotionBtn = document.getElementById('enableMotion');
+  function maybeAskMotion(){
+    const iOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    const needs = typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function';
+    if(iOS && needs){ motionBanner.classList.add('show'); }
+  }
+  enableMotionBtn?.addEventListener('click', async()=>{
+    try{ const p = await DeviceOrientationEvent.requestPermission(); if(p==='granted'){ motionBanner.classList.remove('show'); }}catch(e){ alert('Motion permission was not granted.'); }
+  });
+
+  // ====== Overlay drawing ======
+  const ctx = overlay.getContext('2d');
+  let flowOffset = 0; // animates arrows
+  let navActive = true;
+
+  function drawPath(){
+    const w = overlay.width, h = overlay.height;
+    ctx.clearRect(0,0,w,h);
+
+    // Perspective blue strip
+    const pathTop = h*0.42; // horizon
+    const pathBottom = h*0.95;
+    const mid = w/2;
+    const topWidth = w*0.10, bottomWidth = w*0.55;
+    ctx.save();
+
+    // Slight rotation with compass to feel linked to heading
+    const rot = (heading - 90) * Math.PI/180; // rotate around center
+    ctx.translate(mid, (pathTop+pathBottom)/2);
+    ctx.rotate(rot * 0.05); // tiny coupling for comfort (5%)
+    ctx.translate(-mid, -(pathTop+pathBottom)/2);
+
+    ctx.beginPath();
+    ctx.moveTo(mid - topWidth/2, pathTop);
+    ctx.lineTo(mid + topWidth/2, pathTop);
+    ctx.lineTo(mid + bottomWidth/2, pathBottom);
+    ctx.lineTo(mid - bottomWidth/2, pathBottom);
+    ctx.closePath();
+    const g = ctx.createLinearGradient(0,pathTop,0,pathBottom);
+    g.addColorStop(0,'#7ecbff');
+    g.addColorStop(1,'#1e9cff');
+    ctx.fillStyle = g;
+    ctx.globalAlpha = 0.85;
+    ctx.fill();
+
+    // Moving chevrons
+    const steps = 8;
+    const chevronHeight = (pathBottom-pathTop)/steps;
+    flowOffset = (flowOffset + 2) % chevronHeight;
+    ctx.globalAlpha = 1;
+    for(let i=0;i<steps;i++){
+      const y = pathTop + i*chevronHeight + flowOffset;
+      const t = (y - pathTop)/(pathBottom - pathTop);
+      const wNow = topWidth*(1-t) + bottomWidth*t;
+      const cx = mid;
+      const hh = chevronHeight*0.55;
+      ctx.beginPath();
+      ctx.moveTo(cx - wNow*0.06, y);
+      ctx.lineTo(cx + wNow*0.06, y);
+      ctx.lineTo(cx, y + hh);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.fill();
+    }
+
+    ctx.restore();
+
+    // Optional: heading indicator (small caret at top)
+    ctx.save();
+    ctx.translate(w/2, h*0.18);
+    ctx.rotate((heading-90)*Math.PI/180);
+    ctx.beginPath();
+    ctx.moveTo(-10,0); ctx.lineTo(10,0); ctx.lineTo(0,-14); ctx.closePath();
+    ctx.fillStyle = 'rgba(255,255,255,.9)';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function draw(now){
+    const dt = (now - lastT)/1000; lastT = now;
+    tickDistance(dt);
+    drawPath();
+    requestAnimationFrame(draw);
+  }
+
+  function resize(){
+    overlay.width = app.clientWidth * devicePixelRatio;
+    overlay.height = app.clientHeight * devicePixelRatio;
+    overlay.style.width = app.clientWidth + 'px';
+    overlay.style.height = app.clientHeight + 'px';
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.scale(devicePixelRatio, devicePixelRatio);
+
+    // Map canvas
+    mapCanvas.width = app.clientWidth * devicePixelRatio;
+    mapCanvas.height = app.clientHeight * devicePixelRatio;
+    mapCtx.setTransform(1,0,0,1,0,0);
+    mapCtx.scale(devicePixelRatio, devicePixelRatio);
+    drawMap();
+  }
+  window.addEventListener('resize', resize);
+
+  // ====== Map mode (simple floor map & path) ======
+  const mapPanel = document.getElementById('mapPanel');
+  const mapCanvas = document.getElementById('mapCanvas');
+  const mapCtx = mapCanvas.getContext('2d');
+  const mapToggle = document.getElementById('mapToggle');
+  mapToggle.addEventListener('click',()=>{
+    const show = !mapPanel.classList.contains('show');
+    mapPanel.classList.toggle('show', show);
+    mapToggle.textContent = show ? 'AR Mode' : 'MAP Mode';
+    if(show) drawMap();
+  });
+
+  function drawMap(){
+    const w = app.clientWidth, h = app.clientHeight;
+    mapCtx.clearRect(0,0,w,h);
+    // simple kiosks & route
+    mapCtx.fillStyle = '#e8eef4';
+    mapCtx.fillRect(20, h*0.25, w-40, h*0.5);
+    // start & end points
+    const start = {x:w*0.18, y:h*0.7};
+    const end = {x:w*0.75, y:h*0.33};
+    // path polyline
+    mapCtx.strokeStyle = '#1e9cff';
+    mapCtx.lineWidth = 10;
+    mapCtx.lineCap = 'round';
+    mapCtx.beginPath();
+    mapCtx.moveTo(start.x, start.y);
+    mapCtx.lineTo(w*0.30, h*0.62);
+    mapCtx.lineTo(w*0.50, h*0.52);
+    mapCtx.lineTo(w*0.65, h*0.45);
+    mapCtx.lineTo(end.x, end.y);
+    mapCtx.stroke();
+    // start/end pins
+    mapCtx.fillStyle = '#2ecc71';
+    mapCtx.beginPath(); mapCtx.arc(start.x,start.y,8,0,Math.PI*2); mapCtx.fill();
+    mapCtx.fillStyle = '#ff6b6b';
+    mapCtx.beginPath(); mapCtx.arc(end.x,end.y,10,0,Math.PI*2); mapCtx.fill();
+  }
+
+  // ====== Exit ======
+  document.getElementById('exitBtn').addEventListener('click',()=>{
+    if(history.length>1) history.back(); else alert('Exit pressed');
+  });
+
+  // Boot
+  initCamera();
+  maybeAskMotion();
+  </script>
+</body>
+</html>
