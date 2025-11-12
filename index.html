@@ -1,0 +1,851 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamic WebAR Multi-Waypoint GPS Navigation</title>
+    <!-- Tailwind CSS for modern, aesthetic UI -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- A-Frame and AR.js Libraries for WebAR -->
+    <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+    <!-- Using AR.js for markerless, Web-based AR tracking -->
+    <script src="https://cdn.jsdelivr.net/gh/AR-js-org/AR.js@3.4.1/aframe/build/aframe-ar-nft.js"></script>
+    
+    <style>
+        /* Custom CSS to ensure the scene takes full viewport and typography */
+        body { margin: 0; overflow: hidden; font-family: 'Inter', sans-serif; background-color: #000; }
+        
+        /* The AR scene must be full screen */
+        #ar-scene {
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* UI Overlay for controls and information */
+        #ui-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            padding: 1rem;
+            box-sizing: border-box;
+            pointer-events: none; /* Allows user to interact with the AR scene below */
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* Top control bar for buttons */
+        #top-bar {
+            width: 100%;
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 1rem;
+        }
+
+        /* Info panel for displaying distance and status */
+        #info-panel {
+            background-color: rgba(0, 0, 0, 0.8);
+            color: #00FFFF;
+            padding: 0.75rem 1.25rem;
+            border-radius: 0.75rem;
+            font-size: 1.1rem;
+            font-weight: 700;
+            box-shadow: 0 0 25px #00FFFFD0; /* Intense Glowing effect */
+            pointer-events: auto; 
+            text-align: center;
+            min-width: 90%;
+            transition: all 0.5s ease-in-out;
+        }
+
+        .ar-button {
+            pointer-events: auto; /* Re-enable pointer events for the button */
+            background-color: rgba(34, 197, 94, 0.9); 
+            color: white;
+            padding: 0.6rem 1.2rem;
+            border: none;
+            border-radius: 0.5rem;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.6);
+            transition: background-color 0.3s, transform 0.1s;
+            text-transform: uppercase;
+        }
+
+        .ar-button:hover {
+            background-color: rgba(5, 150, 105, 1.0);
+        }
+
+        .ar-button:active {
+            transform: scale(0.98);
+        }
+
+        /* Full Screen Modal Style */
+        #start-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background-color: #0f172a; /* Slate-900 */
+            z-index: 20;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            padding: 2rem;
+            box-sizing: border-box;
+        }
+
+        .input-group {
+            margin-bottom: 1rem;
+        }
+
+        .input-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+            color: #94a3b8; /* Slate-400 */
+        }
+        
+        /* Class for the Glitch effect on the path */
+        .glitch-active {
+            filter: hue-rotate(90deg) saturate(200%);
+            opacity: 0.2 !important;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- START SCREEN MODAL (Visible initially) -->
+    <div id="start-modal">
+        <div class="max-w-md w-full p-8 bg-slate-800 rounded-xl shadow-2xl border border-cyan-500/50">
+            <h1 class="text-3xl font-extrabold text-cyan-400 mb-4 text-center">AR Multi-Waypoint Navigation (Real Sensors)</h1>
+            <p class="text-slate-300 mb-6 text-center">
+                This app uses your device's **real GPS and Compass sensors** for navigation. Please grant location and motion access.
+                Enter the coordinates for your first destination.
+            </p>
+            
+            <div class="input-group">
+                <label for="dest-lat">Waypoint 1 Latitude (Example: 40.6892 - Statue of Liberty)</label>
+                <input type="number" step="any" id="dest-lat" value="40.6892" class="w-full p-3 rounded-lg bg-slate-700 text-white border border-slate-600 focus:ring-cyan-500 focus:border-cyan-500" placeholder="e.g., 40.6892">
+            </div>
+            
+            <div class="input-group">
+                <label for="dest-lon">Waypoint 1 Longitude (Example: -74.0445 - Statue of Liberty)</label>
+                <input type="number" step="any" id="dest-lon" value="-74.0445" class="w-full p-3 rounded-lg bg-slate-700 text-white border border-slate-600 focus:ring-cyan-500 focus:border-cyan-500" placeholder="e.g., -74.0445">
+            </div>
+            
+            <button id="start-nav-button" onclick="requestPermissionsAndStart()" class="w-full ar-button bg-cyan-600 hover:bg-cyan-700 shadow-lg shadow-cyan-500/50 mt-6">
+                Activate AR Guidance (Requires Permissions)
+            </button>
+        </div>
+    </div>
+
+
+    <!-- JAVASCRIPT CORE LOGIC AND A-FRAME COMPONENTS -->
+    <script>
+        // --- GLOBAL STATE AND CONFIGURATION ---
+        let CURRENT_LAT = 0; 
+        let CURRENT_LON = 0;
+        let CURRENT_ALT = 50; 
+        let INITIAL_WAYPOINT_LAT = 0;
+        let INITIAL_WAYPOINT_LON = 0;
+
+        const INFO_PANEL = document.getElementById('info-panel');
+        const PROXIMITY_THRESHOLD_M = 10; // Must be close to transition to the next waypoint
+        
+        // Default waypoints. The first entry is overwritten by user input.
+        const INITIAL_WAYPOINTS = [
+            { lat: 0, lon: 0, name: "User Target" }, 
+            // Subsequent waypoints for multi-leg journey (e.g., near Statue of Liberty for demo)
+            { lat: 40.6975, lon: -74.0435, name: "Island Viewpoint" }, 
+            { lat: 40.7001, lon: -74.0350, name: "Final Dock" },
+        ];
+        let activeWaypointIndex = 0;
+        let navigationActive = false;
+        
+        // --- WAYPOINT MANAGEMENT CLASS ---
+        const WaypointManager = {
+            waypoints: INITIAL_WAYPOINTS,
+            currentWaypoint: null,
+
+            init(initialLat, initialLon) {
+                // Set the user's input as the first waypoint
+                this.waypoints[0].lat = initialLat;
+                this.waypoints[0].lon = initialLon;
+                activeWaypointIndex = 0;
+                this.currentWaypoint = this.waypoints[activeWaypointIndex];
+            },
+
+            advance() {
+                activeWaypointIndex++;
+                if (activeWaypointIndex < this.waypoints.length) {
+                    this.currentWaypoint = this.waypoints[activeWaypointIndex];
+                    INFO_PANEL.style.backgroundColor = 'rgba(0, 0, 0, 0.8)'; // Reset color
+                    return true;
+                } else {
+                    this.currentWaypoint = null;
+                    return false;
+                }
+            },
+
+            getTarget() {
+                return this.currentWaypoint;
+            },
+            
+            isFinished() {
+                return this.currentWaypoint === null;
+            }
+        };
+
+
+        // --- PERMISSION HANDLER ---
+
+        /**
+         * Requests device orientation permission (for iOS Safari) and then starts navigation.
+         */
+        async function requestPermissionsAndStart() {
+            const latInput = document.getElementById('dest-lat');
+            const lonInput = document.getElementById('dest-lon');
+
+            const newLat = parseFloat(latInput.value);
+            const newLon = parseFloat(lonInput.value);
+
+            if (isNaN(newLat) || isNaN(newLon)) {
+                INFO_PANEL.innerHTML = '<span class="text-red-400">Please enter valid coordinates.</span>';
+                return;
+            }
+
+            INITIAL_WAYPOINT_LAT = newLat;
+            INITIAL_WAYPOINT_LON = newLon;
+
+            // Check if DeviceOrientationEvent.requestPermission is available (iOS 13+)
+            if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                try {
+                    const permissionState = await DeviceOrientationEvent.requestPermission();
+                    if (permissionState === 'granted') {
+                        startNavigation();
+                    } else {
+                        INFO_PANEL.innerHTML = '<span class="text-red-400">Compass Permission Denied. Cannot calculate bearing.</span>';
+                    }
+                } catch (error) {
+                    console.error('Permission Request Error:', error);
+                    INFO_PANEL.innerHTML = '<span class="text-red-400">Error requesting compass permission.</span>';
+                }
+            } else {
+                // Non-iOS or older iOS device, permissions granted on page load (or not needed)
+                startNavigation();
+            }
+        }
+
+
+        // --- NAVIGATION INITIALIZATION ---
+
+        /**
+         * Function to start the AR navigation after permissions are granted.
+         * Sets up the WaypointManager and A-Frame components.
+         */
+        function startNavigation() {
+            const startModal = document.getElementById('start-modal');
+            const pathEntity = document.getElementById('navigation-path');
+            const assistantEntity = document.getElementById('navigation-assistant');
+            
+            // Initialize Waypoint Manager with user's first target
+            WaypointManager.init(INITIAL_WAYPOINT_LAT, INITIAL_WAYPOINT_LON);
+
+            // Configure AR Components
+            pathEntity.setAttribute('dynamic-target-rotation', 'isReady', true);
+            assistantEntity.setAttribute('navigation-assistant', 'isReady', true);
+            pathEntity.setAttribute('path-glitch-simulator', 'isActive', true);
+            
+            // Hide Modal and Show AR View
+            startModal.style.display = 'none';
+            pathEntity.setAttribute('visible', true);
+            assistantEntity.setAttribute('visible', true);
+            document.getElementById('clear-nav-button').disabled = false;
+            navigationActive = true;
+            
+            INFO_PANEL.textContent = 'Acquiring REAL GPS and Compass Lock...';
+        }
+
+        // --- UTILITY FUNCTIONS ---
+
+        /**
+         * Calculates the initial bearing (in degrees) between two GPS points.
+         */
+        function calculateBearing(lat1, lon1, lat2, lon2) {
+            const R_lat1 = lat1 * Math.PI / 180;
+            const R_lat2 = lat2 * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+
+            const y = Math.sin(dLon) * Math.cos(R_lat2);
+            const x = Math.cos(R_lat1) * Math.sin(R_lat2) - 
+                      Math.sin(R_lat1) * Math.cos(R_lat2) * Math.cos(dLon);
+            
+            let bearing = Math.atan2(y, x) * 180 / Math.PI;
+
+            return (bearing + 360) % 360; 
+        }
+
+        /**
+         * Calculates the distance (in meters) between two GPS points using the Haversine formula.
+         */
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371e3; // Earth's radius in meters
+            const phi1 = lat1 * Math.PI / 180;
+            const phi2 = lat2 * Math.PI / 180;
+            const delta_phi = (lat2 - lat1) * Math.PI / 180;
+            const delta_lambda = (lon2 - lon1) * Math.PI / 180;
+
+            const a = Math.sin(delta_phi / 2) * Math.sin(delta_phi / 2) +
+                      Math.cos(phi1) * Math.cos(phi2) *
+                      Math.sin(delta_lambda / 2) * Math.sin(delta_lambda / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+            return R * c; // Distance in meters
+        }
+
+        /**
+         * Function linked to the "Clear Navigation" button
+         */
+        function clearNavigation() {
+            const pathEntity = document.querySelector('#navigation-path');
+            const clearButton = document.querySelector('#clear-nav-button');
+            const destinationMarker = document.querySelector('#destination-marker');
+            const assistantEntity = document.querySelector('#navigation-assistant');
+
+            const rotationComponent = pathEntity.components['dynamic-target-rotation'];
+            const flowComponent = pathEntity.components['flow-path'];
+            const glitchComponent = pathEntity.components['path-glitch-simulator'];
+            const assistantComponent = assistantEntity.components['navigation-assistant'];
+
+
+            if (pathEntity) {
+                // 1. Stop animation and glitch components
+                if (flowComponent) flowComponent.stopFlow();
+                if (glitchComponent) glitchComponent.data.isActive = false;
+
+                // 2. Disable custom tracking component and clean up listeners robustly
+                if (rotationComponent) {
+                    // Set isReady to false to stop the tick function immediately
+                    pathEntity.setAttribute('dynamic-target-rotation', 'isReady', false);
+                    rotationComponent.remove(); 
+                }
+                if (assistantComponent) {
+                    // This component has no external listeners, but we can set its data to a default state
+                    assistantEntity.setAttribute('navigation-assistant', 'distance', 9999);
+                }
+                
+                pathEntity.setAttribute('visible', false);
+                destinationMarker.setAttribute('visible', false);
+                assistantEntity.setAttribute('visible', false);
+                
+                clearButton.textContent = 'Navigation Reset';
+                clearButton.disabled = true;
+                
+                document.getElementById('start-modal').style.display = 'flex';
+                INFO_PANEL.textContent = 'Navigation Halted. Enter new destination.';
+                INFO_PANEL.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+                navigationActive = false;
+            }
+        }
+
+
+        // --- A-FRAME COMPONENT 1: FLOW PATH ANIMATION (with Depth Scaling) ---
+        AFRAME.registerComponent('flow-path', {
+            schema: {
+                speed: {type: 'number', default: 2.5}, 
+                resetDistance: {type: 'number', default: 20}, 
+                count: {type: 'number', default: 20},
+                minScale: {type: 'number', default: 0.25} 
+            },
+            init: function () {
+                this.arrows = [];
+                // Collect all arrow entities
+                for (let i = 0; i < this.data.count; i++) {
+                    const arrow = this.el.querySelector(`#arrow-${i}`);
+                    if (arrow) {
+                        this.arrows.push(arrow);
+                    }
+                }
+                this.active = true;
+            },
+            
+            tick: function (time, deltaTime) {
+                if (!this.active || !deltaTime) return;
+                
+                const deltaSeconds = deltaTime / 1000;
+                const distanceToMove = this.data.speed * deltaSeconds;
+                const maxZ = this.data.resetDistance;
+
+                this.arrows.forEach(arrow => {
+                    const pos = arrow.object3D.position;
+                    
+                    pos.z -= distanceToMove;
+
+                    if (pos.z < 0) {
+                        pos.z += maxZ; 
+                    }
+
+                    // Dynamic Scaling for Depth Effect (Realism)
+                    const scaleFactor = this.data.minScale + 
+                                        (1 - this.data.minScale) * (pos.z / maxZ);
+                    arrow.setAttribute('scale', `${scaleFactor} ${scaleFactor} ${scaleFactor}`);
+                });
+            },
+
+            stopFlow: function() { this.active = false; },
+            startFlow: function() { this.active = true; }
+        });
+
+
+        // --- A-FRAME COMPONENT 2: DYNAMIC TARGET ROTATION (Real Sensor Data Handling) ---
+        AFRAME.registerComponent('dynamic-target-rotation', {
+            schema: {
+                isReady: {type: 'boolean', default: false} 
+            },
+            
+            init: function () {
+                this.currentHeading = null;
+                this.targetBearing = null;
+                this.distanceMeters = Infinity;
+                this.geoWatcher = null; // Will store the ID for geolocation watch
+                
+                // Bind handlers for real-time sensor updates
+                this.compassHandler = this.updateCompass.bind(this);
+                this.geoSuccessHandler = this.updateGeoPosition.bind(this);
+                
+                this.destinationMarker = document.getElementById('destination-marker');
+                this.assistantEntity = document.getElementById('navigation-assistant');
+                
+                this.el.setAttribute('visible', false); 
+                this.destinationMarker.setAttribute('visible', false);
+                this.assistantEntity.setAttribute('visible', false);
+            },
+
+            update: function(oldData) {
+                if (!oldData.isReady && this.data.isReady) {
+                    this.startTracking();
+                } else if (oldData.isReady && !this.data.isReady) {
+                    // Handle cleanup when switched off via attribute
+                    this.remove(); 
+                }
+            },
+            
+            startTracking: function() {
+                // Prevent starting twice if already active
+                if (this.geoWatcher !== null) return;
+
+                // 1. Start Geolocation Watcher (Uses REAL GPS sensor data)
+                if (navigator.geolocation) {
+                    this.geoWatcher = navigator.geolocation.watchPosition(
+                        this.geoSuccessHandler, 
+                        (error) => { 
+                            console.error('Geolocation Error:', error); 
+                            INFO_PANEL.innerHTML = '<span class="text-red-400">GPS ERROR: Check Location Settings and Network.</span>'; 
+                        },
+                        { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+                    );
+                } else {
+                    INFO_PANEL.innerHTML = '<span class="text-red-400">Geolocation not supported by device/browser.</span>';
+                }
+
+                // 2. Start Device Orientation Listener (Uses REAL Compass/Gyro sensor data)
+                if (window.DeviceOrientationEvent) {
+                    window.addEventListener('deviceorientationabsolute', this.compassHandler, true);
+                    INFO_PANEL.textContent = 'Waiting for initial GPS fix...';
+                } else {
+                    INFO_PANEL.innerHTML = '<span class="text-red-400">Device Orientation (Compass) not supported.</span>';
+                }
+            },
+            
+            updateGeoPosition: function (position) {
+                if (!this.data.isReady) return; // Guard against running while disabled
+
+                // Extracting real data from the position object
+                CURRENT_LAT = position.coords.latitude;
+                CURRENT_LON = position.coords.longitude;
+                CURRENT_ALT = position.coords.altitude || CURRENT_ALT; 
+                
+                const target = WaypointManager.getTarget();
+
+                if (!target) {
+                    // Navigation completed state
+                    this.el.setAttribute('visible', false);
+                    this.destinationMarker.setAttribute('visible', false);
+                    this.assistantEntity.setAttribute('visible', false);
+                    INFO_PANEL.innerHTML = '<span class="text-yellow-400">**NAVIGATION COMPLETE!** System Halted.</span>';
+                    INFO_PANEL.style.backgroundColor = 'rgba(180, 83, 9, 0.9)'; 
+                    document.getElementById('clear-nav-button').disabled = false;
+                    this.remove(); // Final cleanup
+                    return;
+                }
+
+                // 1. Calculate bearing and distance to the current target using real coordinates
+                this.targetBearing = calculateBearing(
+                    CURRENT_LAT, CURRENT_LON, 
+                    target.lat, target.lon
+                );
+                
+                this.distanceMeters = calculateDistance(
+                    CURRENT_LAT, CURRENT_LON, 
+                    target.lat, target.lon
+                );
+
+                // 2. Proximity Check and Waypoint Transition
+                let statusText;
+                let colorClass = 'text-cyan-400';
+                
+                if (this.distanceMeters < PROXIMITY_THRESHOLD_M) {
+                    // REACHED WAYPOINT - Advance
+                    const advanced = WaypointManager.advance();
+                    
+                    if (advanced) {
+                        const nextTarget = WaypointManager.getTarget();
+                        statusText = `WAYPOINT ${activeWaypointIndex} REACHED! Heading to: ${nextTarget.name}`;
+                        colorClass = 'text-lime-400';
+                        INFO_PANEL.style.backgroundColor = 'rgba(45, 212, 191, 0.9)'; 
+                        this.destinationMarker.setAttribute('visible', true); 
+                    } else {
+                        return; // Handled by !target check at the top
+                    }
+                } else {
+                    // Still navigating to the current waypoint
+                    statusText = `Waypoint ${activeWaypointIndex + 1} (${target.name}): ${this.distanceMeters.toFixed(1)}m away.`;
+                    colorClass = (this.distanceMeters < 50) ? 'text-yellow-400' : 'text-cyan-400';
+                    this.destinationMarker.setAttribute('visible', this.distanceMeters < 50);
+                    this.el.setAttribute('visible', true); 
+                    this.assistantEntity.setAttribute('visible', true);
+                    INFO_PANEL.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+                }
+                
+                // Update UI with real-time data
+                INFO_PANEL.innerHTML = `
+                    <div class="flex justify-between w-full">
+                        <span class="${colorClass} text-xl">${statusText}</span>
+                        <span class="text-sm text-slate-400">ALT: ${CURRENT_ALT.toFixed(1)}m</span>
+                    </div>
+                    <span class="text-xs text-slate-400 block mt-1">
+                        GPS: ${CURRENT_LAT.toFixed(5)}, ${CURRENT_LON.toFixed(5)}
+                    </span>
+                `;
+                
+                // Pass latest distance and bearing to the assistant component
+                this.assistantEntity.setAttribute('navigation-assistant', {
+                    distance: this.distanceMeters,
+                    currentWaypointName: WaypointManager.getTarget()?.name || 'Final Destination'
+                });
+            },
+            
+            updateCompass: function (event) {
+                // event.alpha is the absolute direction (0-360, North is 0) from the REAL compass sensor
+                if (event.alpha !== null) {
+                    this.currentHeading = event.alpha;
+                }
+            },
+
+            tick: function () {
+                if (!this.data.isReady || this.currentHeading === null || this.targetBearing === null || WaypointManager.isFinished()) return;
+                
+                // 1. Calculate the difference between target bearing and current heading
+                let rotationAngle = this.targetBearing - this.currentHeading;
+                
+                // Normalize rotation angle to the shortest path
+                if (rotationAngle > 180) rotationAngle -= 360;
+                if (rotationAngle < -180) rotationAngle += 360;
+
+                // 2. Apply rotation to the AR path container to point the path correctly
+                this.el.setAttribute('rotation', `0 ${rotationAngle} 0`);
+                
+                // 3. Apply the same rotation to the destination marker and assistant
+                this.destinationMarker.setAttribute('rotation', `0 ${rotationAngle} 0`);
+                this.assistantEntity.setAttribute('rotation', `0 ${rotationAngle} 0`);
+            },
+
+            /**
+             * Clean up all external resources and ensure state is reset.
+             * This function is called manually during reset, or implicitly by A-Frame.
+             */
+            remove: function () {
+                // 1. Clean up compass listener
+                window.removeEventListener('deviceorientationabsolute', this.compassHandler, true);
+                
+                // 2. Clean up Geolocation Watcher ONLY IF IT WAS STARTED
+                if (navigator.geolocation && this.geoWatcher !== null) {
+                    navigator.geolocation.clearWatch(this.geoWatcher);
+                    this.geoWatcher = null; 
+                }
+            }
+        });
+
+        // --- A-FRAME COMPONENT 3: DYNAMIC COMPASS ROSE ---
+        AFRAME.registerComponent('compass-rose', {
+            init: function() {
+                this.compassHandler = this.updateRotation.bind(this);
+
+                // Add event listener for compass (Relies on real device orientation)
+                if (window.DeviceOrientationEvent) {
+                    window.addEventListener('deviceorientationabsolute', this.compassHandler, true);
+                }
+            },
+            
+            updateRotation: function(event) {
+                if (event.alpha !== null) {
+                    // The compass rose must rotate opposite to the device's absolute heading (alpha)
+                    const rotation = event.alpha * -1;
+                    this.el.setAttribute('rotation', `0 ${rotation} 0`);
+                }
+            },
+
+            remove: function() {
+                window.removeEventListener('deviceorientationabsolute', this.compassHandler, true);
+            }
+        });
+        
+        // --- A-FRAME COMPONENT 4: PATH GLITCH SIMULATOR (Simulates real-world sensor/signal noise) ---
+        AFRAME.registerComponent('path-glitch-simulator', {
+            schema: {
+                isActive: {type: 'boolean', default: false},
+                glitchChance: {type: 'number', default: 0.005}, // 0.5% chance per frame
+                glitchDuration: {type: 'number', default: 500}, // 500ms glitch duration
+            },
+            
+            init: function() {
+                this.isGlitching = false;
+                this.glitchTimer = 0;
+                this.pathEntity = document.getElementById('navigation-path');
+                this.infoPanel = document.getElementById('info-panel');
+                this.originalPanelColor = this.infoPanel.style.backgroundColor || 'rgba(0, 0, 0, 0.8)';
+            },
+            
+            tick: function(time, deltaTime) {
+                if (!this.data.isActive) return;
+
+                if (this.isGlitching) {
+                    this.glitchTimer += deltaTime;
+                    
+                    // End glitch
+                    if (this.glitchTimer >= this.data.glitchDuration) {
+                        this.isGlitching = false;
+                        this.pathEntity.classList.remove('glitch-active');
+                        this.infoPanel.style.backgroundColor = this.originalPanelColor;
+                        this.pathEntity.components['flow-path'].startFlow();
+                        this.glitchTimer = 0;
+                    }
+                } else if (Math.random() < this.data.glitchChance) {
+                    // Start glitch
+                    this.isGlitching = true;
+                    this.pathEntity.classList.add('glitch-active');
+                    this.infoPanel.style.backgroundColor = 'rgba(255, 0, 0, 0.9)'; // Red flash for signal loss
+                    this.pathEntity.components['flow-path'].stopFlow();
+                }
+            }
+        });
+        
+        // --- A-FRAME COMPONENT 5: DYNAMIC ASSISTANT ---
+        AFRAME.registerComponent('navigation-assistant', {
+            schema: {
+                distance: {type: 'number', default: 9999},
+                currentWaypointName: {type: 'string', default: 'Target'}
+            },
+            
+            init: function() {
+                this.textEntity = this.el.querySelector('#assistant-text');
+            },
+            
+            update: function() {
+                let message;
+                const distance = this.data.distance;
+                const name = this.data.currentWaypointName;
+                
+                if (distance > 500) {
+                    message = `Head to ${name}. We have a long way to go, keep moving!`;
+                } else if (distance > 100) {
+                    message = `${name} is ${distance.toFixed(0)} meters ahead. Keep focused!`;
+                } else if (distance > PROXIMITY_THRESHOLD_M) {
+                    message = `Almost there! Just ${distance.toFixed(1)}m to Waypoint ${activeWaypointIndex + 1}.`;
+                } else {
+                    message = `Great job! Waypoint reached. Preparing next route...`;
+                }
+                
+                this.textEntity.setAttribute('text', 'value', message);
+            }
+        });
+        
+        // --- A-FRAME COMPONENT 6: ANIMATED GROUND GRID ---
+        AFRAME.registerComponent('moving-grid', {
+            schema: {
+                color: {type: 'color', default: '#00FFFF'},
+                speed: {type: 'number', default: 0.5}
+            },
+            
+            init: function() {
+                // Using a fallback placeholder image for the grid texture
+                const texture = new THREE.TextureLoader().load('https://placehold.co/128x128/0000FF/FFFFFF?text=GRID');
+                
+                texture.wrapS = THREE.RepeatWrapping;
+                texture.wrapT = THREE.RepeatWrapping;
+                texture.repeat.set(100, 100);
+
+                this.el.setAttribute('material', {
+                    src: texture,
+                    transparent: true,
+                    opacity: 0.2,
+                    color: this.data.color,
+                    side: 'double'
+                });
+                this.texture = texture;
+            },
+            
+            tick: function(time, deltaTime) {
+                if (!this.texture) return;
+                const offset = deltaTime / 1000 * this.data.speed;
+                this.texture.offset.y -= offset;
+            }
+        });
+    </script>
+
+
+    <!-- UI Overlay (Tailwind CSS classes for aesthetics) -->
+    <div id="ui-overlay">
+        <div id="top-bar">
+            <button id="clear-nav-button" disabled class="ar-button bg-red-600 hover:bg-red-700 shadow-xl shadow-red-500/50" onclick="clearNavigation()">
+                Clear Navigation
+            </button>
+        </div>
+        <div id="info-panel" class="mt-4">
+            Awaiting Destination Input.
+        </div>
+    </div>
+
+    <!-- A-Frame Scene Setup -->
+    <a-scene 
+        id="ar-scene"
+        vr-mode-ui="enabled: false"
+        renderer="logarithmicDepthBuffer: true; colorManagement: true"
+        arjs='sourceType: webcam; trackingMethod: best; debugUIEnabled: false;'>
+
+        <!-- Asset Mixin for the Pulsing Orb -->
+        <a-assets>
+            <a-mixin id="pulse" 
+                     attribute="scale" 
+                     dur="1500" 
+                     direction="alternate" 
+                     to="0.9 0.9 0.9" 
+                     repeat="indefinite">
+            </a-mixin>
+            <a-mixin id="arrow-style" 
+                     geometry="primitive: cone; height: 1; radiusBottom: 0.3; radiusTop: 0.05"
+                     material="color: #00FF00; emissive: #00FF00; emissiveIntensity: 0.5"
+                     rotation="90 0 0" 
+                     scale="0.2 0.2 0.2">
+            </a-mixin>
+        </a-assets>
+
+        <!-- Animated Ground Plane (For speed and scale realism) -->
+        <a-plane 
+            position="0 0 -1" 
+            rotation="-90 0 0" 
+            width="100" 
+            height="100" 
+            moving-grid="color: #00FFFF; speed: 1.5"
+            ></a-plane>
+
+
+        <!--
+            The Path Container - Dynamically rotated to point to the user's chosen destination, based on REAL compass data.
+            This entity is controlled by dynamic-target-rotation.
+        -->
+        <a-entity id="navigation-path" 
+                  flow-path="count: 30; speed: 4; resetDistance: 30; minScale: 0.15"
+                  dynamic-target-rotation="isReady: false"
+                  path-glitch-simulator="isActive: false">
+            
+            <!-- Generate the path arrows -->
+            <!-- The flow-path component handles the movement and scaling of these arrows -->
+            <a-entity id="arrow-0" mixin="arrow-style" position="0 0 10.0"></a-entity>
+            <a-entity id="arrow-1" mixin="arrow-style" position="0 0 9.5"></a-entity>
+            <a-entity id="arrow-2" mixin="arrow-style" position="0 0 9.0"></a-entity>
+            <a-entity id="arrow-3" mixin="arrow-style" position="0 0 8.5"></a-entity>
+            <a-entity id="arrow-4" mixin="arrow-style" position="0 0 8.0"></a-entity>
+            <a-entity id="arrow-5" mixin="arrow-style" position="0 0 7.5"></a-entity>
+            <a-entity id="arrow-6" mixin="arrow-style" position="0 0 7.0"></a-entity>
+            <a-entity id="arrow-7" mixin="arrow-style" position="0 0 6.5"></a-entity>
+            <a-entity id="arrow-8" mixin="arrow-style" position="0 0 6.0"></a-entity>
+            <a-entity id="arrow-9" mixin="arrow-style" position="0 0 5.5"></a-entity>
+            <a-entity id="arrow-10" mixin="arrow-style" position="0 0 5.0"></a-entity>
+            <a-entity id="arrow-11" mixin="arrow-style" position="0 0 4.5"></a-entity>
+            <a-entity id="arrow-12" mixin="arrow-style" position="0 0 4.0"></a-entity>
+            <a-entity id="arrow-13" mixin="arrow-style" position="0 0 3.5"></a-entity>
+            <a-entity id="arrow-14" mixin="arrow-style" position="0 0 3.0"></a-entity>
+            <a-entity id="arrow-15" mixin="arrow-style" position="0 0 2.5"></a-entity>
+            <a-entity id="arrow-16" mixin="arrow-style" position="0 0 2.0"></a-entity>
+            <a-entity id="arrow-17" mixin="arrow-style" position="0 0 1.5"></a-entity>
+            <a-entity id="arrow-18" mixin="arrow-style" position="0 0 1.0"></a-entity>
+            <a-entity id="arrow-19" mixin="arrow-style" position="0 0 0.5"></a-entity>
+            <a-entity id="arrow-20" mixin="arrow-style" position="0 0 0.0"></a-entity>
+
+        </a-entity>
+
+        <!-- Destination Marker (Visible when close to target) -->
+        <a-entity id="destination-marker" dynamic-target-rotation="isReady: false" visible="false">
+            <a-sphere radius="1.5" 
+                      position="0 3 -20" 
+                      material="color: #FF00FF; opacity: 0.5; flatShading: true; metalness: 0.8"
+                      animation="property: rotation; to: 0 360 0; loop: true; dur: 8000; easing: linear;">
+                <a-text value="DESTINATION" 
+                        align="center" 
+                        position="0 1.8 0" 
+                        width="10" 
+                        color="#FF00FF"></a-text>
+            </a-sphere>
+        </a-entity>
+        
+        <!--
+            The Navigation Assistant (The glowing orb and text, similar to the Unity 3D guide)
+        -->
+        <a-entity id="navigation-assistant" 
+                  navigation-assistant="isReady: false" 
+                  position="0 2 -10" 
+                  scale="0.8 0.8 0.8" 
+                  visible="false"> 
+            
+            <!-- 3D Assistant Core (A glowing, pulsing orb) -->
+            <a-sphere position="0 0.5 0" 
+                      radius="0.4" 
+                      color="#FFFF00" 
+                      material="emissive: #FFA500; emissiveIntensity: 1.5"
+                      mixin="pulse">
+            </a-sphere>
+            
+            <!-- Assistant Text Bubble -->
+            <a-entity id="assistant-text" 
+                      text="value: Initializing Assistant; 
+                            align: center; 
+                            width: 5; 
+                            wrapCount: 30;
+                            color: white; 
+                            backgroundColor: rgba(0, 0, 0, 0.7)"
+                      position="0 -0.5 0" 
+                      rotation="0 0 0">
+            </a-entity>
+        </a-entity>
+
+
+        <!-- Camera setup for AR -->
+        <a-camera gps-camera rotation-reader>
+            <!-- A basic compass rose in the corner of the screen (fixed to camera) -->
+            <a-entity compass-rose position="1 -1.5 -3">
+                <a-cylinder height="0.05" radius="0.4" color="#FF0000" rotation="-90 0 0">
+                    <a-text value="N" position="0 0 0.42" color="#FFFFFF" width="2" align="center"></a-text>
+                    <a-cone height="0.1" radius-bottom="0.08" radius-top="0" position="0 0 0.45" color="#FF0000" rotation="0 0 0"></a-cone>
+                </a-cylinder>
+            </a-entity>
+        </a-camera>
+
+    </a-scene>
+</body>
+</html>
